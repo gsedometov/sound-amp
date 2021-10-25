@@ -31,9 +31,6 @@ struct App {
     output_devices: StatefulList<(Device, usize)>,
     active_panel_index: i8,
     factor: f32,
-    // link_is_active: bool,
-    // input_stream: Arc<Mutex<Option<cpal::Stream>>>,
-    // output_stream: Option<cpal::Stream>,
 }
 
 impl App {
@@ -49,10 +46,6 @@ impl App {
         }
     }
 
-    fn get_factor(&self) -> f32 {
-        self.factor
-    }
-
     fn active_panel(&mut self) -> &mut StatefulList<(Device, usize)> {
         if self.active_panel_index == 0 {
             &mut self.input_devices
@@ -65,34 +58,28 @@ impl App {
         self.active_panel_index = (self.active_panel_index + 1) % 2
     }
 
-    // fn increase_volume(&mut self) {
-    //     self.factor += 10.0;
-    //     if self.link_is_active {
-    //         self.link_selected_devices();
-    //     }
-    // }
-    //
-    // fn decrease_volume(&mut self) {
-    //     let new_factor = self.factor - 0.1;
-    //     self.factor = if new_factor > 0.0 { new_factor } else { 0.0 };
-    //     if self.link_is_active {
-    //         self.link_selected_devices();
-    //     }
-    // }
+    fn increase_volume(&mut self) {
+        self.factor += 10.0;
+        println!("New factor: {:?}", self.factor);
+    }
 
-    fn link_selected_devices(&self) -> Result<(), Box<dyn error::Error>> {
-        let ring = RingBuffer::new(8192);
+    fn decrease_volume(&mut self) {
+        let new_factor = self.factor - 10.0;
+        self.factor = if new_factor > 0.0 { new_factor } else { 0.0 };
+    }
+
+    fn link_selected_devices(&self) -> Result<[cpal::Stream; 2], Box<dyn error::Error>> {
+        let buffer_size = 48000;
+        let ring = RingBuffer::new(buffer_size);
         let (mut producer, mut consumer) = ring.split();
-        let get_factor = || {
-            &self.factor
-        };
+        for _ in 0..1000 {
+            producer.push(0.0).unwrap();
+        }
 
+        let volume_factor = self.factor;
         let input_data_fn = move |data: &[f32], _: &cpal::InputCallbackInfo| {
             for &sample in data {
-                producer.push(sample * 1.0);
-                // if producer.push(sample).is_err() {
-                //     output_fell_behind = true;
-                // }
+                producer.push(sample * volume_factor);
             }
         };
 
@@ -114,8 +101,9 @@ impl App {
         // let output_device = self.output_devices.state.selected().map(|i| &self.output_devices.items[i].0).expect("No output device selected");
         let output_device = cpal::default_host().default_output_device().unwrap();
 
-        // let input_config = cpal::StreamConfig{ channels: 2, sample_rate: SampleRate(44100), buffer_size: BufferSize::Default };
-        let input_config = input_device.default_input_config().unwrap().into();
+        let input_config = cpal::StreamConfig{ channels: 2, sample_rate: SampleRate(44100), buffer_size: BufferSize::Default };
+        // let input_config = input_device.default_input_config().unwrap().into();
+        println!("Input config: {:?}", &input_config);
         let input_stream = input_device.build_input_stream(&input_config, input_data_fn, err_fn).unwrap();
 
         // if self.input_stream.lock().unwrap().deref().is_some() {
@@ -129,24 +117,14 @@ impl App {
         // }
 
         // let output_config = cpal::StreamConfig{ channels: 2, sample_rate: SampleRate(48000), buffer_size: BufferSize::Default };
-        let output_config = output_device.default_output_config().unwrap().into();
-        let output_stream = output_device.build_output_stream(&output_config, output_data_fn, err_fn).unwrap();
+        // let output_config = output_device.default_output_config().unwrap().into();
+        println!("Output config: {:?}", &input_config);
+        let output_stream = output_device.build_output_stream(&input_config, output_data_fn, err_fn).unwrap();
 
         input_stream.play()?;
         output_stream.play()?;
         println!("Streams are connected");
-
-        // for the purposes of this demo, leak these so that after returning the audio units will
-        // keep running
-        std::mem::forget(input_stream);
-        std::mem::forget(output_stream);
-        // self.input_stream.replace(Some(input_stream));
-        // self.output_stream.replace(Some(output_stream));
-        // self.link_is_active = true;
-        // **self.input_stream = Some(input_stream);
-        // self.input_stream.lock().unwrap().replace(input_stream);
-        // self.output_stream = Some(output_stream);
-        Ok(())
+        Ok([input_stream, output_stream])
     }
 }
 
@@ -154,12 +132,6 @@ fn main() -> Result<(), Box<dyn error::Error>>{
     let host = cpal::default_host();
     let input_devices = host.input_devices()?;
     let output_devices = host.output_devices()?;
-
-    // host.output_devices()?.for_each(|dev| {
-    //     let configs = dev.supported_output_configs().unwrap();
-    //     configs.for_each(|config| println!("Device: {}, config: {:?}", &dev.name().unwrap(), config))
-    // }
-    // );
 
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
@@ -173,6 +145,7 @@ fn main() -> Result<(), Box<dyn error::Error>>{
     );
 
     let mut app = App::new(l, r);
+    let mut link: Vec<cpal::Stream> = vec![];
 
     loop {
         terminal.draw(|f| {
@@ -205,12 +178,20 @@ fn main() -> Result<(), Box<dyn error::Error>>{
             Ok(evt) => if let Event::Key(k) = evt {
                 match k {
                     KeyEvent { code: KeyCode::Char('q'), .. } => {break; }
-                    // KeyEvent { code: KeyCode::Char('+'), .. } => app.increase_volume(),
-                    // KeyEvent { code: KeyCode::Char('-'), .. } => app.decrease_volume(),
+                    KeyEvent { code: KeyCode::Char('+'), .. } => {
+                        app.increase_volume();
+                        link = app.link_selected_devices().unwrap().into();
+                    },
+                    KeyEvent { code: KeyCode::Char('-'), .. } => {
+                        app.decrease_volume();
+                        link = app.link_selected_devices().unwrap().into();
+                    },
                     KeyEvent { code: KeyCode::Down, .. } => app.active_panel().next(),
                     KeyEvent { code: KeyCode::Up, .. } => app.active_panel().previous(),
                     KeyEvent { code: KeyCode::Tab, .. } => app.next_panel(),
-                    KeyEvent { code: KeyCode::Enter, .. } => app.link_selected_devices().unwrap(),
+                    KeyEvent { code: KeyCode::Enter, .. } => {
+                        link = app.link_selected_devices().unwrap().into();
+                    },
                     _ => {}
                 }
             }
