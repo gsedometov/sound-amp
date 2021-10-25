@@ -1,0 +1,12 @@
+[package]
+name = "sound-amp"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+cpal = "0.13.1"
+tui = { version = "0.16", default-features = false, features = ['crossterm'] }
+crossterm = "0.18.2"
+ringbuf = "0.2.2"
