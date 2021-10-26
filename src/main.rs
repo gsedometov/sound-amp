@@ -1,9 +1,10 @@
 extern crate ringbuf;
 
-use std::{error, io};
-use std::cell::RefCell;
+use std::{error, io, sync, thread};
+use std::borrow::Borrow;
+use std::cell::{Cell, RefCell};
 use std::ops::Deref;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, mpsc, Mutex};
 
 use cpal::{BufferSize, Device, DevicesError, SampleRate};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -146,7 +147,7 @@ fn main() -> Result<(), Box<dyn error::Error>>{
 
     let mut app = App::new(l, r);
     let mut link: Vec<cpal::Stream> = vec![];
-
+    let player_channel = setup_stream();
     loop {
         terminal.draw(|f| {
             let chunks = Layout::default()
@@ -179,8 +180,9 @@ fn main() -> Result<(), Box<dyn error::Error>>{
                 match k {
                     KeyEvent { code: KeyCode::Char('q'), .. } => {break; }
                     KeyEvent { code: KeyCode::Char('+'), .. } => {
-                        app.increase_volume();
-                        link = app.link_selected_devices().unwrap().into();
+                        player_channel.send(PlayerCommand::IncreaseVolume(10.0));
+                        // app.increase_volume();
+                        // link = app.link_selected_devices().unwrap().into();
                     },
                     KeyEvent { code: KeyCode::Char('-'), .. } => {
                         app.decrease_volume();
@@ -190,7 +192,7 @@ fn main() -> Result<(), Box<dyn error::Error>>{
                     KeyEvent { code: KeyCode::Up, .. } => app.active_panel().previous(),
                     KeyEvent { code: KeyCode::Tab, .. } => app.next_panel(),
                     KeyEvent { code: KeyCode::Enter, .. } => {
-                        link = app.link_selected_devices().unwrap().into();
+                        player_channel.send(PlayerCommand::Start(app.input_devices.state.selected().unwrap()));
                     },
                     _ => {}
                 }
@@ -214,4 +216,73 @@ fn make_devices_widget_items(devices: &Vec<(Device, usize)>) -> Vec<ListItem> {
 
 fn err_fn(err: cpal::StreamError) {
     eprintln!("an error occurred on stream: {:?}", err);
+}
+
+enum PlayerCommand {
+    Start(usize),
+    IncreaseVolume(f32),
+}
+
+fn setup_stream() -> mpsc::Sender<PlayerCommand> {
+    let (tx,rx) = mpsc::channel();
+    thread::spawn(move || {
+        let host = cpal::default_host();
+        let output_device = host.default_output_device().expect("Failed to get default output device");
+        println!("Sound device: {}", output_device.name().unwrap());
+
+        let format  = output_device.default_output_config().expect("Failed to get default output format");
+
+        println!("Format: {:?}", format);
+        let mut output_stream = Option::default();
+        let mut input_stream = Option::default();
+        let mut volume_factor = Arc::new(Mutex::new(1f32));
+
+
+        loop {
+            if let Ok(command) = rx.try_recv() {
+                match command {
+                    PlayerCommand::Start(input_device_i) => {
+                        let ring : RingBuffer<f32> = RingBuffer::new(48000);
+                        let (mut producer, mut consumer) = ring.split();
+                        let input_device = &host.input_devices().unwrap().collect::<Vec<Device>>()[input_device_i];
+                        input_stream = {
+                            let factor = Arc::clone(&volume_factor);
+                            let s = input_device.build_input_stream(
+                                &input_device.default_input_config().unwrap().into(),
+                                move |data: &[f32], _| {
+                                    let factor_value = *factor.lock().unwrap();
+                                    for &sample in data {
+                                        producer.push(sample * factor_value).unwrap();
+                                    }
+                                },
+                                |_| {},
+                            ).unwrap();
+                            s.play();
+                            Some(s)
+                        };
+                        output_stream = {
+                            let s = output_device.build_output_stream(
+                                &output_device.default_output_config().unwrap().into(),
+                                move |data: &mut [f32], _| {
+                                    for sample in data {
+                                        *sample = consumer.pop().unwrap_or(0.0);
+                                    }
+                                },
+                                |_| {}
+                            ).unwrap();
+                            s.play();
+                            Some(s)
+                        };
+                    }
+                    PlayerCommand::IncreaseVolume(amount) => {
+                        let old_value = *volume_factor.lock().unwrap();
+                        let new_value = old_value + amount;
+                        *volume_factor.lock().unwrap() = new_value;
+                        println!("New volume: {:?}", new_value);
+                    }
+                }
+            }
+        }
+    });
+    tx
 }
