@@ -1,23 +1,19 @@
 extern crate ringbuf;
 
-use std::borrow::Borrow;
-use std::cell::{Cell, RefCell};
-use std::ops::Deref;
-use std::sync::mpsc::TryRecvError;
 use std::sync::{mpsc, Arc, Mutex};
-use std::{error, io, sync, thread};
+use std::{error, io, thread};
+
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{BufferSize, Device, DevicesError, SampleRate};
+use cpal::{BufferSize, Device, InputCallbackInfo, OutputCallbackInfo, SampleRate};
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use ringbuf::RingBuffer;
 use tui::widgets::ListState;
 use tui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Corner, Direction, Layout},
+    layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
-    text::{Span, Spans},
-    widgets::{Block, Borders, List, ListItem},
+    widgets::{List, ListItem},
     Terminal,
 };
 
@@ -31,8 +27,7 @@ pub struct StatefulList<T> {
 struct App {
     input_devices: StatefulList<(Device, usize)>,
     output_devices: StatefulList<(Device, usize)>,
-    active_panel_index: i8,
-    factor: f32,
+    active_panel_index: u8,
 }
 
 impl App {
@@ -44,10 +39,6 @@ impl App {
             input_devices,
             output_devices,
             active_panel_index: 0,
-            factor: 1.0,
-            // link_is_active: false,
-            // input_stream: Arc::new(Mutex::new(None)),
-            // output_stream: None,
         }
     }
 
@@ -61,88 +52,6 @@ impl App {
 
     fn next_panel(&mut self) {
         self.active_panel_index = (self.active_panel_index + 1) % 2
-    }
-
-    fn increase_volume(&mut self) {
-        self.factor += 10.0;
-        println!("New factor: {:?}", self.factor);
-    }
-
-    fn decrease_volume(&mut self) {
-        let new_factor = self.factor - 10.0;
-        self.factor = if new_factor > 0.0 { new_factor } else { 0.0 };
-    }
-
-    fn link_selected_devices(&self) -> Result<[cpal::Stream; 2], Box<dyn error::Error>> {
-        let buffer_size = 48000;
-        let ring = RingBuffer::new(buffer_size);
-        let (mut producer, mut consumer) = ring.split();
-        for _ in 0..1000 {
-            producer.push(0.0).unwrap();
-        }
-
-        let volume_factor = self.factor;
-        let input_data_fn = move |data: &[f32], _: &cpal::InputCallbackInfo| {
-            for &sample in data {
-                producer.push(sample * volume_factor);
-            }
-        };
-
-        let output_data_fn = move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            let mut input_fell_behind = None;
-            for sample in data {
-                *sample = match consumer.pop() {
-                    Some(s) => s,
-                    None => {
-                        eprintln!("Reading error");
-                        input_fell_behind = Some("Reading error");
-                        0.0
-                    }
-                };
-            }
-        };
-
-        let input_device = self
-            .input_devices
-            .state
-            .selected()
-            .map(|i| &self.input_devices.items[i].0)
-            .expect("No input device selected");
-        // let output_device = self.output_devices.state.selected().map(|i| &self.output_devices.items[i].0).expect("No output device selected");
-        let output_device = cpal::default_host().default_output_device().unwrap();
-
-        let input_config = cpal::StreamConfig {
-            channels: 2,
-            sample_rate: SampleRate(44100),
-            buffer_size: BufferSize::Default,
-        };
-        // let input_config = input_device.default_input_config().unwrap().into();
-        println!("Input config: {:?}", &input_config);
-        let input_stream = input_device
-            .build_input_stream(&input_config, input_data_fn, err_fn)
-            .unwrap();
-
-        // if self.input_stream.lock().unwrap().deref().is_some() {
-        //     // self.input_stream = None;
-        //     let ptr = self.input_stream.lock().unwrap();
-        //     *ptr = None;
-        // }
-
-        // if self.output_stream.is_some() {
-        //     self.output_stream = None;
-        // }
-
-        // let output_config = cpal::StreamConfig{ channels: 2, sample_rate: SampleRate(48000), buffer_size: BufferSize::Default };
-        // let output_config = output_device.default_output_config().unwrap().into();
-        println!("Output config: {:?}", &input_config);
-        let output_stream = output_device
-            .build_output_stream(&input_config, output_data_fn, err_fn)
-            .unwrap();
-
-        input_stream.play()?;
-        output_stream.play()?;
-        println!("Streams are connected");
-        Ok([input_stream, output_stream])
     }
 }
 
@@ -201,7 +110,6 @@ fn main() -> Result<(), Box<dyn error::Error>> {
                 &mut app.output_devices.state,
             )
         });
-
         match event::read() {
             Ok(evt) => {
                 if let Event::Key(k) = evt {
@@ -216,16 +124,13 @@ fn main() -> Result<(), Box<dyn error::Error>> {
                             code: KeyCode::Char('+'),
                             ..
                         } => {
-                            player_channel.send(PlayerCommand::IncreaseVolume(10.0));
-                            // app.increase_volume();
-                            // link = app.link_selected_devices().unwrap().into();
+                            player_channel.send(PlayerCommand::IncreaseVolume(1.0));
                         }
                         KeyEvent {
                             code: KeyCode::Char('-'),
                             ..
                         } => {
-                            app.decrease_volume();
-                            link = app.link_selected_devices().unwrap().into();
+                            player_channel.send(PlayerCommand::IncreaseVolume(-1.0));
                         }
                         KeyEvent {
                             code: KeyCode::Down,
@@ -261,14 +166,10 @@ fn make_devices_widget_items(devices: &Vec<(Device, usize)>) -> Vec<ListItem> {
     let input_devices_list_style = Style::default().fg(Color::Black).bg(Color::White);
     devices
         .iter()
-        .map(|(dev, i)| {
-            ListItem::new(dev.name().unwrap().to_string()).style(input_devices_list_style.clone())
+        .map(|(dev, _i)| {
+            ListItem::new(dev.name().unwrap()).style(input_devices_list_style)
         })
         .collect()
-}
-
-fn err_fn(err: cpal::StreamError) {
-    eprintln!("an error occurred on stream: {:?}", err);
 }
 
 enum PlayerCommand {
@@ -279,30 +180,19 @@ enum PlayerCommand {
 fn setup_stream() -> mpsc::Sender<PlayerCommand> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let mut output_stream = Option::default();
-        let mut input_stream = Option::default();
-        let mut volume_factor = Arc::new(Mutex::new(1f32));
-
-        loop {
-            match rx.recv() {
-                Ok(command) => match command {
-                    PlayerCommand::Start(input_device_i) => {
-                        let link = create_link(input_device_i, &volume_factor);
-                        input_stream = Some(link.0);
-                        output_stream = Some(link.1);
-                    }
-                    PlayerCommand::IncreaseVolume(amount) => {
-                        let old_value = *volume_factor.lock().unwrap();
-                        let new_value = old_value + amount;
-                        *volume_factor.lock().unwrap() = new_value;
-                        println!("New volume: {:?}", new_value);
-                    }
-                },
-                Err(RecvError::Disconnected) => {
-                    break;
+        let mut link: Vec<cpal::Stream> = vec![];
+        let volume_factor = Arc::new(Mutex::new(1f32));
+        let command_handler = |command: PlayerCommand| {
+            match command {
+                PlayerCommand::Start(input_device_i) => {
+                    link = create_link(input_device_i, &volume_factor);
+                }
+                PlayerCommand::IncreaseVolume(amount) => {
+                    *volume_factor.lock().unwrap() += amount;
                 }
             }
-        }
+        };
+        rx.iter().for_each(command_handler);
     });
     tx
 }
@@ -310,7 +200,7 @@ fn setup_stream() -> mpsc::Sender<PlayerCommand> {
 fn create_link(
     input_device_id: usize,
     volume_factor: &Arc<Mutex<f32>>,
-) -> (cpal::Stream, cpal::Stream) {
+) -> Vec<cpal::Stream> {
     let host = cpal::default_host();
     let output_device = host
         .default_output_device()
@@ -326,36 +216,42 @@ fn create_link(
     let (mut producer, mut consumer) = ring.split();
     let input_device = &host.input_devices().unwrap().collect::<Vec<Device>>()[input_device_id];
     let input_stream = {
-        let factor = Arc::clone(&volume_factor);
+        let factor = Arc::clone(volume_factor);
+        let data_callback = move |data: &[f32], _: &InputCallbackInfo| {
+            let factor_value = *factor.lock().unwrap();
+            for &sample in data {
+                producer.push(sample * factor_value);
+            };
+        };
         let s = input_device
             .build_input_stream(
                 &input_device.default_input_config().unwrap().into(),
-                move |data: &[f32], _| {
-                    let factor_value = *factor.lock().unwrap();
-                    for &sample in data {
-                        producer.push(sample * factor_value).unwrap();
-                    }
-                },
-                |_| {},
+                data_callback,
+                err_fn,
             )
-            .unwrap();
-        s.play();
+            .expect("Cannot create input stream");
+        s.play().expect("Cannot start input stream");
         s
     };
     let output_stream = {
+        let data_callback = move |data: &mut [f32], _: &OutputCallbackInfo| {
+            for sample in data {
+                *sample = consumer.pop().unwrap_or(0.0);
+            }
+        };
         let s = output_device
             .build_output_stream(
                 &output_device.default_output_config().unwrap().into(),
-                move |data: &mut [f32], _| {
-                    for sample in data {
-                        *sample = consumer.pop().unwrap_or(0.0);
-                    }
-                },
-                |_| {},
+                data_callback,
+                err_fn,
             )
-            .unwrap();
-        s.play();
+            .expect("Cannot create output stream");
+        s.play().expect("Cannot start output stream");
         s
     };
-    (input_stream, output_stream)
+    vec![input_stream, output_stream]
+}
+
+fn err_fn(err: cpal::StreamError) {
+    eprintln!("an error occurred on stream: {:?}", err);
 }
