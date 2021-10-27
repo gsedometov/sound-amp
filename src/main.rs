@@ -2,6 +2,7 @@ extern crate ringbuf;
 
 use std::sync::{mpsc, Arc, Mutex};
 use std::{error, io, thread};
+use std::io::Stdout;
 
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -9,13 +10,7 @@ use cpal::{BufferSize, Device, InputCallbackInfo, OutputCallbackInfo, SampleRate
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use ringbuf::RingBuffer;
 use tui::widgets::ListState;
-use tui::{
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
-    widgets::{List, ListItem},
-    Terminal,
-};
+use tui::{backend::CrosstermBackend, layout::{Constraint, Direction, Layout}, style::{Color, Modifier, Style}, widgets::{List, ListItem}, Terminal, Frame};
 
 mod stateful_list;
 
@@ -74,42 +69,9 @@ fn main() -> Result<(), Box<dyn error::Error>> {
     );
 
     let mut app = App::new(l, r);
-    let mut link: Vec<cpal::Stream> = vec![];
     let player_channel = setup_stream();
     loop {
-        terminal.draw(|f| {
-            let chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
-                .split(f.size());
-
-            let left_items: Vec<ListItem> = make_devices_widget_items(&app.input_devices.items);
-
-            let input_devices_widget = List::new(left_items).highlight_style(
-                Style::default()
-                    .bg(Color::LightGreen)
-                    .add_modifier(Modifier::BOLD),
-            );
-            f.render_stateful_widget(
-                input_devices_widget,
-                chunks[0],
-                &mut app.input_devices.state,
-            );
-
-            let right_items: Vec<ListItem> = make_devices_widget_items(&app.output_devices.items);
-
-            let output_devices_widget = List::new(right_items).highlight_style(
-                Style::default()
-                    .bg(Color::LightGreen)
-                    .add_modifier(Modifier::BOLD),
-            );
-
-            f.render_stateful_widget(
-                output_devices_widget,
-                chunks[1],
-                &mut app.output_devices.state,
-            )
-        });
+        terminal.draw(|f| draw_tui(f, &mut app));
         match event::read() {
             Ok(evt) => {
                 if let Event::Key(k) = evt {
@@ -160,6 +122,40 @@ fn main() -> Result<(), Box<dyn error::Error>> {
 
     terminal.clear()?;
     Ok(())
+}
+
+fn draw_tui(f: &mut Frame<CrosstermBackend<Stdout>>, app: &mut App) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
+        .split(f.size());
+
+    let left_items: Vec<ListItem> = make_devices_widget_items(&app.input_devices.items);
+
+    let input_devices_widget = List::new(left_items).highlight_style(
+        Style::default()
+            .bg(Color::LightGreen)
+            .add_modifier(Modifier::BOLD),
+    );
+    f.render_stateful_widget(
+        input_devices_widget,
+        chunks[0],
+        &mut app.input_devices.state,
+    );
+
+    let right_items: Vec<ListItem> = make_devices_widget_items(&app.output_devices.items);
+
+    let output_devices_widget = List::new(right_items).highlight_style(
+        Style::default()
+            .bg(Color::LightGreen)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    f.render_stateful_widget(
+        output_devices_widget,
+        chunks[1],
+        &mut app.output_devices.state,
+    )
 }
 
 fn make_devices_widget_items(devices: &Vec<(Device, usize)>) -> Vec<ListItem> {
