@@ -3,10 +3,11 @@ extern crate ringbuf;
 use std::sync::{mpsc, Arc, Mutex};
 use std::{error, io, thread};
 use std::io::Stdout;
+use std::sync::mpsc::{Sender};
 
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{BufferSize, Device, InputCallbackInfo, OutputCallbackInfo, SampleRate};
+use cpal::{Device, InputCallbackInfo, OutputCallbackInfo};
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use ringbuf::RingBuffer;
 use tui::widgets::ListState;
@@ -72,56 +73,47 @@ fn main() -> Result<(), Box<dyn error::Error>> {
     let player_channel = setup_stream();
     loop {
         terminal.draw(|f| draw_tui(f, &mut app));
-        match event::read() {
-            Ok(evt) => {
-                if let Event::Key(k) = evt {
-                    match k {
-                        KeyEvent {
-                            code: KeyCode::Char('q'),
-                            ..
-                        } => {
-                            break;
-                        }
-                        KeyEvent {
-                            code: KeyCode::Char('+'),
-                            ..
-                        } => {
-                            player_channel.send(PlayerCommand::IncreaseVolume(1.0));
-                        }
-                        KeyEvent {
-                            code: KeyCode::Char('-'),
-                            ..
-                        } => {
-                            player_channel.send(PlayerCommand::IncreaseVolume(-1.0));
-                        }
-                        KeyEvent {
-                            code: KeyCode::Down,
-                            ..
-                        } => app.active_panel().next(),
-                        KeyEvent {
-                            code: KeyCode::Up, ..
-                        } => app.active_panel().previous(),
-                        KeyEvent {
-                            code: KeyCode::Tab, ..
-                        } => app.next_panel(),
-                        KeyEvent {
-                            code: KeyCode::Enter,
-                            ..
-                        } => {
-                            player_channel.send(PlayerCommand::Start(
-                                app.input_devices.state.selected().unwrap(),
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
+        if let Ok(Event::Key(key)) = event::read() {
+            let should_stop = handle_key(&mut app, key, &player_channel);
+            if should_stop {
+                break;
             }
-            Err(_) => {}
         }
     }
 
     terminal.clear()?;
     Ok(())
+}
+
+fn handle_key(app: &mut App, key: KeyEvent, player_channel: &Sender<PlayerCommand>) -> bool {
+    if key.code == KeyCode::Char('q') {
+        true
+    } else {
+        match key.code {
+            KeyCode::Char('+') => {
+                player_channel.send(PlayerCommand::IncreaseVolume(1.0));
+            },
+            KeyCode::Char('-') => {
+                player_channel.send(PlayerCommand::IncreaseVolume(-1.0));
+            },
+            KeyCode::Down => {
+                app.active_panel().next();
+            },
+            KeyCode::Up => {
+                app.active_panel().previous();
+            },
+            KeyCode::Tab => {
+                app.next_panel();
+            },
+            KeyCode::Enter => {
+                player_channel.send(PlayerCommand::Start(
+                    app.input_devices.state.selected().unwrap(),
+                ));
+            }
+            _ => {}
+        }
+        false
+    }
 }
 
 fn draw_tui(f: &mut Frame<CrosstermBackend<Stdout>>, app: &mut App) {
